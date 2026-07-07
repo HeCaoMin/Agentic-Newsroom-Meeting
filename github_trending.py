@@ -1,16 +1,20 @@
 ﻿"""
 GitHub Trending Daily Scraper
-Scrapes https://github.com/trending?since=daily and outputs structured JSON.
+Scrapes https://github.com/trending?since=daily, fetches each repo's README,
+and outputs structured JSON with original Markdown content preserved.
 """
 
 import json
 import os
+import time
 from datetime import datetime
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from html.parser import HTMLParser
 
 
 TRENDING_URL = "https://github.com/trending?since=daily"
+API_README_TEMPLATE = "https://api.github.com/repos/{owner}/{name}/readme"
 
 
 class TrendingParser(HTMLParser):
@@ -45,7 +49,6 @@ class TrendingParser(HTMLParser):
             if href.startswith("/"):
                 self._current["href"] = href
 
-        # Description paragraph: <p class="col-9 color-fg-muted my-1 tmp-pr-4">
         if tag == "p":
             cls = attrs_dict.get("class", "")
             if "col-9" in cls and "color-fg-muted" in cls and "my-1" in cls:
@@ -93,6 +96,28 @@ def parse_trending(html):
     return parser.repos
 
 
+def fetch_readme(owner, name):
+    """Fetch the raw Markdown README via GitHub API."""
+    api_url = API_README_TEMPLATE.format(owner=owner, name=name)
+    req = Request(api_url, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/vnd.github.raw",
+    })
+    try:
+        with urlopen(req, timeout=30) as resp:
+            if resp.status == 200:
+                return resp.read().decode("utf-8")
+    except HTTPError as e:
+        if e.code == 404:
+            return ""
+        print(f"  HTTP {e.code} fetching README for {owner}/{name}")
+    except URLError as e:
+        print(f"  URL error fetching README for {owner}/{name}: {e.reason}")
+    except Exception as e:
+        print(f"  Error fetching README for {owner}/{name}: {e}")
+    return ""
+
+
 def main():
     today = datetime.now()
     date_str = today.strftime("%y_%m_%d")
@@ -112,11 +137,25 @@ def main():
             f.write(html)
         print(f"Raw HTML saved to {debug_path} for debugging.")
 
+    # Fetch README for each repo
+    print(f"Fetching README for {len(repos)} repos ...")
+    for i, repo in enumerate(repos, 1):
+        owner, name = repo["owner"], repo["name"]
+        print(f"  [{i}/{len(repos)}] {owner}/{name} ...", end=" ", flush=True)
+        readme = fetch_readme(owner, name)
+        repo["readme"] = readme
+        status = "OK" if readme else "EMPTY/NOT FOUND"
+        print(status)
+        # Be polite to the API — small delay between requests
+        if i < len(repos):
+            time.sleep(0.5)
+
     output_file = os.path.join(output_dir, f"{file_date}GithubTrendingDaily.json")
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(repos, f, ensure_ascii=False, indent=2)
 
-    print(f"Done - {len(repos)} repos saved to {output_file}")
+    readme_count = sum(1 for r in repos if r["readme"])
+    print(f"Done - {len(repos)} repos ({readme_count} with README) saved to {output_file}")
 
 
 if __name__ == "__main__":
