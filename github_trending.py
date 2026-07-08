@@ -6,6 +6,7 @@ and outputs structured JSON with original Markdown content preserved.
 
 import json
 import os
+import re
 import time
 from datetime import datetime
 from urllib.error import HTTPError, URLError
@@ -18,7 +19,7 @@ API_README_TEMPLATE = "https://api.github.com/repos/{owner}/{name}/readme"
 
 
 class TrendingParser(HTMLParser):
-    """Minimal HTML parser that extracts repo info from GitHub trending page."""
+    """HTML parser that extracts repo info from GitHub trending page."""
 
     def __init__(self):
         super().__init__()
@@ -49,11 +50,29 @@ class TrendingParser(HTMLParser):
             if href.startswith("/"):
                 self._current["href"] = href
 
+        # Total stars: <a href="/owner/repo/stargazers" class="...Link--muted...">
+        if tag == "a":
+            href = attrs_dict.get("href", "")
+            if href.endswith("/stargazers"):
+                self._capture = "total_stars"
+                self._text_buf = ""
+                return
+
+        # Description paragraph
         if tag == "p":
             cls = attrs_dict.get("class", "")
             if "col-9" in cls and "color-fg-muted" in cls and "my-1" in cls:
                 self._capture = "desc"
                 self._text_buf = ""
+                return
+
+        # Today's stars: <span class="d-inline-block float-sm-right">
+        if tag == "span":
+            cls = attrs_dict.get("class", "")
+            if "d-inline-block" in cls and "float-sm-right" in cls:
+                self._capture = "today_stars"
+                self._text_buf = ""
+                return
 
     def handle_endtag(self, tag):
         if tag == "article" and self._in_article:
@@ -65,6 +84,8 @@ class TrendingParser(HTMLParser):
                     "name": name,
                     "owner": owner,
                     "description": self._current.get("description", ""),
+                    "total_stars": self._current.get("total_stars", 0),
+                    "today_stars": self._current.get("today_stars", 0),
                     "url": f"https://github.com/{owner}/{name}",
                 })
             self._in_article = False
@@ -75,13 +96,28 @@ class TrendingParser(HTMLParser):
         if tag == "h2" and self._capture == "h2":
             self._capture = None
 
+        if tag == "a" and self._capture == "total_stars":
+            self._current["total_stars"] = _parse_number(self._text_buf)
+            self._capture = None
+
         if tag == "p" and self._capture == "desc":
             self._current["description"] = self._text_buf.strip()
             self._capture = None
 
+        if tag == "span" and self._capture == "today_stars":
+            self._current["today_stars"] = _parse_number(self._text_buf)
+            self._capture = None
+
     def handle_data(self, data):
-        if self._capture in ("h2", "desc"):
+        if self._capture in ("h2", "desc", "total_stars", "today_stars"):
             self._text_buf += data
+
+
+def _parse_number(text):
+    """Parse a number string like '51,976' or '1,378 stars today' into an int."""
+    text = text.strip().replace(",", "")
+    match = re.search(r"\d+", text)
+    return int(match.group()) if match else 0
 
 
 def fetch_trending(url=TRENDING_URL):
@@ -146,7 +182,7 @@ def main():
         repo["readme"] = readme
         status = "OK" if readme else "EMPTY/NOT FOUND"
         print(status)
-        # Be polite to the API — small delay between requests
+        # Be polite to the API
         if i < len(repos):
             time.sleep(0.5)
 
